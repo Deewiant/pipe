@@ -3,7 +3,7 @@
 {-# LANGUAGE FlexibleInstances, ScopedTypeVariables #-}
 
 module System.Process.Pipe.Plumbing
-   ( Accessible(..), Tap(..), Sink(..)
+   ( Tap(..), Sink(..)
    , bufferSize
    ) where
 
@@ -17,25 +17,18 @@ import Data.Word             (Word8)
 import Foreign.Marshal.Array (peekArray, pokeArray)
 import Foreign.Ptr           (Ptr, castPtr)
 import Foreign.Storable      (Storable, sizeOf)
-import System.IO             (Handle, hClose, hGetBuf, hPutBuf, hIsEOF)
-
--- | An Accessible is anything which can be opened or closed. By default both
--- operations do nothing.
-class Accessible a where
-   open, close :: a -> IO ()
-   open  _ = return ()
-   close _ = return ()
+import System.IO             (Handle, hGetBuf, hPutBuf, hIsEOF)
 
 -- | From a Tap, data up to the requested amount flows into a Ptr. The exact
 -- amount of Word8's that flowed is returned. The requested amount is
 -- guaranteed to be no greater than 'bufferSize'.
-class Accessible a => Tap a where
+class Tap a where
    flowOut   :: a -> Ptr Word8 -> Int -> IO Int
    exhausted :: a -> IO Bool
 
 -- | To a Sink, the requested amount of Word8's flows from a Ptr. The requested
 -- amount is guaranteed to be no greater than 'bufferSize'.
-class Accessible a => Sink a where
+class Sink a where
    flowIn :: a -> Ptr Word8 -> Int -> IO ()
 
 -- | The size of one chunk of data. A Ptr Word8 given to a 'Tap' or 'Sink' is
@@ -48,15 +41,12 @@ bufferSize = 48*1024
 
 -- Handle
 
-instance Accessible Handle where close   = hClose
 instance Tap        Handle where flowOut = hGetBuf; exhausted = hIsEOF
 instance Sink       Handle where flowIn  = hPutBuf
 
 -- Storable a => IORef [a]
 
-instance Storable a => Accessible (IORef [a])
-
-instance (Show a, Storable a) => Tap (IORef [a]) where
+instance Storable a => Tap (IORef [a]) where
    exhausted = fmap null . readIORef
 
    flowOut x buf sz = do
@@ -71,14 +61,12 @@ instance (Show a, Storable a) => Tap (IORef [a]) where
 
       return sz'
 
-instance (Show a, Storable a) => Sink (IORef [a]) where
+instance Storable a => Sink (IORef [a]) where
    flowIn x buf sz = do
       xs <- peekArray (sz `div` sizeOf (undefined :: a)) (castPtr buf)
       modifyIORef x (++ xs)
 
 -- Storable a => IORef (Seq a)
-
-instance Storable a => Accessible (IORef (Seq a))
 
 instance Storable a => Tap (IORef (Seq a)) where
    exhausted = fmap S.null . readIORef
@@ -100,9 +88,6 @@ instance Storable a => Sink (IORef (Seq a)) where
 
 -- We cheat and know in advance that ByteStrings contain octets and thus we
 -- don't need all the messing about with sizeOf.
-
-instance Accessible (IORef BS.ByteString)
-instance Accessible (IORef BL.ByteString)
 
 instance Tap (IORef BS.ByteString) where
    exhausted = fmap BS.null . readIORef
@@ -134,4 +119,3 @@ instance Sink (IORef BL.ByteString) where
    flowIn x buf sz = do
       xs <- peekArray sz (castPtr buf)
       modifyIORef x (`BL.append` BL.pack xs)
-

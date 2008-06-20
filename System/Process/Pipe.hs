@@ -22,11 +22,10 @@
 -------------------------------------------------------------------------------
 module System.Process.Pipe
    ( filePipe
-   , Accessible(..), Tap(..), Sink(..), bufferSize
+   , Tap(..), Sink(..), bufferSize
    , pipe
    ) where
 
-import Control.Exception     (bracket_)
 import Control.Monad         (forM)
 import Data.Maybe            (fromJust)
 import Data.Word             (Word8)
@@ -125,17 +124,15 @@ pipe wdir progs tap sink = do
 
    let cp = createProc wdir CreatePipe CreatePipe
 
-   bracket_ (open sink) (close sink) $
-    bracket_ (open tap) (close tap)  $
-     allocaBytes bufferSize $ \buf -> do
-        ps <- forM progs $ \pr -> do
-           (i,o,pid) <- cp pr
-           return (fromJust i, fromJust o, pid)
+   allocaBytes bufferSize $ \buf -> do
+      ps <- forM progs $ \pr -> do
+         (i,o,pid) <- cp pr
+         return (fromJust i, fromJust o, pid)
 
 -- See 'pipeline' comment below for why this needs to be done differently.
 #if mingw32_HOST_OS
-        -- Gather up all data from the tap until it's exhausted.
-        let loop s = do
+      -- Gather up all data from the tap until it's exhausted.
+      let loop s = do
              exh <- exhausted tap
              if exh
                 then return s
@@ -144,10 +141,10 @@ pipe wdir progs tap sink = do
                    xs <- peekArray sz (castPtr buf)
                    loop (s `BS.append` BS.pack xs)
 
-        s <- loop BS.empty
-        pipeline sink buf ps s
+      s <- loop BS.empty
+      pipeline sink buf ps s
 #else
-        let loop = do
+      let loop = do
              exh <- exhausted tap
              if exh
                 then return ()
@@ -163,7 +160,7 @@ pipe wdir progs tap sink = do
                       -- with any leftover output.
                       finalPipeline outhdl ps buf
                    loop
-         in loop
+      loop
 #endif
 
 #if mingw32_HOST_OS
