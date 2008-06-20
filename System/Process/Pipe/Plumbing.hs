@@ -1,7 +1,5 @@
 -- File created: 2008-06-20 14:51:20
 
-{-# LANGUAGE FlexibleInstances, ScopedTypeVariables #-}
-
 module System.Process.Pipe.Plumbing
    ( Tap(..), Sink(..)
    , bufferSize
@@ -10,7 +8,6 @@ module System.Process.Pipe.Plumbing
 import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Foldable         (toList)
-import Data.IORef            (IORef, readIORef, writeIORef, modifyIORef)
 import Data.Sequence         (Seq)
 import qualified Data.Sequence as S
 import Data.Word             (Word8)
@@ -23,99 +20,93 @@ import System.IO             (Handle, hGetBuf, hPutBuf, hIsEOF)
 -- amount of Word8's that flowed is returned. The requested amount is
 -- guaranteed to be no greater than 'bufferSize'.
 class Tap a where
-   flowOut   :: a -> Ptr Word8 -> Int -> IO Int
+   flowOut   :: a -> Ptr Word8 -> Int -> IO (a, Int)
    exhausted :: a -> IO Bool
 
 -- | To a Sink, the requested amount of Word8's flows from a Ptr. The requested
 -- amount is guaranteed to be no greater than 'bufferSize'.
 class Sink a where
-   flowIn :: a -> Ptr Word8 -> Int -> IO ()
+   flowIn :: a -> Ptr Word8 -> Int -> IO a
 
 -- | The size of one chunk of data. A Ptr Word8 given to a 'Tap' or 'Sink' is
 -- guaranteed to have room for this many Word8's, but no more.
 bufferSize :: Int
-bufferSize = 48*1024
+bufferSize = 32*1024
 
 -- Instances
 ------------
 
 -- Handle
 
-instance Tap        Handle where flowOut = hGetBuf; exhausted = hIsEOF
-instance Sink       Handle where flowIn  = hPutBuf
+instance Tap  Handle where flowOut h b s = hGetBuf h b s >>= return . (,) h
+                           exhausted     = hIsEOF
+instance Sink Handle where flowIn  h b s = hPutBuf h b s >>  return       h
 
--- Storable a => IORef [a]
+-- Storable a => [a]
 
-instance Storable a => Tap (IORef [a]) where
-   exhausted = fmap null . readIORef
+instance Storable a => Tap [a] where
+   exhausted = return . null
 
    flowOut x buf sz = do
-      dat <- readIORef x
+      let size     = sizeOf (head x)
+          (xs, ys) = splitAt (sz `div` size) x
+          -- avoid expensive call to 'length' if possible
+          sz'      = if null ys then size * length xs else sz
 
-      let size     = sizeOf (undefined :: a)
-          (xs, ys) = splitAt (sz `div` size) dat
-          sz'      = size * if null ys then length xs else sz
-
-      writeIORef x ys
       pokeArray (castPtr buf) xs
+      return (ys, sz')
 
-      return sz'
-
-instance Storable a => Sink (IORef [a]) where
+instance Storable a => Sink [a] where
    flowIn x buf sz = do
-      xs <- peekArray (sz `div` sizeOf (undefined :: a)) (castPtr buf)
-      modifyIORef x (++ xs)
+      xs <- peekArray (sz `div` sizeOf (head x)) (castPtr buf)
+      return (x ++ xs)
 
--- Storable a => IORef (Seq a)
+-- Storable a => Seq a
 
-instance Storable a => Tap (IORef (Seq a)) where
-   exhausted = fmap S.null . readIORef
+instance Storable a => Tap (Seq a) where
+   exhausted = return . S.null
 
    flowOut x buf sz = do
-      s <- readIORef x
-      let size     = sizeOf (undefined :: a)
-          (xs, ys) = S.splitAt (sz `div` size) s
-      writeIORef x ys
+      let size     = sizeOf (S.index x 0)
+          (xs, ys) = S.splitAt (sz `div` size) x
+
       pokeArray (castPtr buf) (toList xs)
-      return (size * S.length xs)
+      return (ys, size * S.length xs)
 
-instance Storable a => Sink (IORef (Seq a)) where
+instance Storable a => Sink (Seq a) where
    flowIn x buf sz = do
-      xs <- peekArray (sz `div` sizeOf (undefined :: a)) (castPtr buf)
-      modifyIORef x (S.>< S.fromList xs)
+      xs <- peekArray (sz `div` sizeOf (S.index x 0)) (castPtr buf)
+      return (x S.>< S.fromList xs)
 
--- IORef ByteString (both strict and lazy)
+-- ByteString (both strict and lazy)
 
 -- We cheat and know in advance that ByteStrings contain octets and thus we
 -- don't need all the messing about with sizeOf.
 
-instance Tap (IORef BS.ByteString) where
-   exhausted = fmap BS.null . readIORef
+instance Tap BS.ByteString where
+   exhausted = return . BS.null
 
    flowOut x buf sz = do
-      s <- readIORef x
+      let (xs, ys) = BS.splitAt sz x
 
-      let (xs, ys) = BS.splitAt sz s
-      writeIORef x ys
       pokeArray (castPtr buf) (BS.unpack xs)
-      return (BS.length xs)
+      return (ys, BS.length xs)
 
-instance Tap (IORef BL.ByteString) where
-   exhausted = fmap BL.null . readIORef
+instance Tap BL.ByteString where
+   exhausted = return . BL.null
 
    flowOut x buf sz = do
-      s <- readIORef x
-      let (xs, ys) = BL.splitAt (fromIntegral sz) s
-      writeIORef x ys
+      let (xs, ys) = BL.splitAt (fromIntegral sz) x
+
       pokeArray (castPtr buf) (BL.unpack xs)
-      return . fromIntegral . BL.length $ xs
+      return (ys, fromIntegral . BL.length $ xs)
 
-instance Sink (IORef BS.ByteString) where
+instance Sink BS.ByteString where
    flowIn x buf sz = do
       xs <- peekArray sz (castPtr buf)
-      modifyIORef x (`BS.append` BS.pack xs)
+      return (x `BS.append` BS.pack xs)
 
-instance Sink (IORef BL.ByteString) where
+instance Sink BL.ByteString where
    flowIn x buf sz = do
       xs <- peekArray sz (castPtr buf)
-      modifyIORef x (`BL.append` BL.pack xs)
+      return (x `BL.append` BL.pack xs)

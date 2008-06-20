@@ -8,7 +8,7 @@
 -- License   : BSD (see LICENSE.txt)
 --
 -- Maintainer  : Matti Niemenmaa <matti.niemenmaa+web@iki.fi>
--- Portability : non-portable (instances need FlexibleInstances/ScopedTypeVars)
+-- Portability : portable
 -- Stability   : experimental
 --
 -- Operations for piping data through multiple processes.
@@ -24,9 +24,11 @@ module System.Process.Pipe
    ( filePipe
    , Tap(..), Sink(..), bufferSize
    , pipe
+   , word8ToString, stringToWord8
    ) where
 
 import Control.Monad         (forM)
+import Data.Char             (chr, ord)
 import Data.Maybe            (fromJust)
 import Data.Word             (Word8)
 import Foreign.Marshal.Alloc (allocaBytes)
@@ -48,15 +50,10 @@ import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
 import Foreign.Ptr           (castPtr)
 #else
-import Control.Monad         (when)
-import System.IO             ( hIsEOF, hIsOpen
-                             , hGetBuf, hGetBufNonBlocking, hPutBuf)
+import System.IO             (hIsOpen, hGetBuf, hGetBufNonBlocking, hPutBuf)
 import System.IO.Error       (isFullError)
 import System.Posix.Signals  ( Signal, openEndedPipe
                              , Handler (Ignore), installHandler)
-
-whenM :: (Monad m) => m Bool -> m a -> m ()
-whenM cond body = cond >>= \c -> when c (body >> return ())
 #endif
 
 type Command = (FilePath, [String])
@@ -92,6 +89,7 @@ filePipe progs infile outfile = do
    withBinaryFile outfile WriteMode $ \outhdl ->
     withBinaryFile infile ReadMode  $ \inhdl ->
       pipe (dropFileName infile) progs inhdl outhdl
+   return ()
 
 -- | Pipes data from the 'Tap' to the 'Sink' through all the commands named, in
 -- the given working directory.
@@ -119,8 +117,8 @@ filePipe progs infile outfile = do
 -- (probably nontrivial) and let me know so that I can activate the better code
 -- for Windows as well. Alternatively, feel free to code an implementation of
 -- this which works on Windows.
-pipe :: (Tap t, Sink s) => FilePath -> [Command] -> t -> s -> IO ()
-pipe wdir progs tap sink = do
+pipe :: (Tap t, Sink s) => FilePath -> [Command] -> t -> s -> IO (t,s)
+pipe wdir progs otap osink = do
 
    let cp = createProc wdir CreatePipe CreatePipe
 
@@ -132,35 +130,39 @@ pipe wdir progs tap sink = do
 -- See 'pipeline' comment below for why this needs to be done differently.
 #if mingw32_HOST_OS
       -- Gather up all data from the tap until it's exhausted.
-      let loop s = do
+      let loop tap s = do
              exh <- exhausted tap
              if exh
-                then return s
+                then return (tap,s)
                 else do
-                   sz <- flowOut tap buf bufferSize
+                   (tap',sz) <- flowOut tap buf bufferSize
                    xs <- peekArray sz (castPtr buf)
-                   loop (s `BS.append` BS.pack xs)
+                   loop tap' (s `BS.append` BS.pack xs)
 
-      s <- loop BS.empty
-      pipeline sink buf ps s
+      (tap, s) <- loop otap BS.empty
+      sink <- pipeline osink buf ps s
+      return (tap,sink)
 #else
-      let loop = do
+      let loop tap sink = do
              exh <- exhausted tap
              if exh
-                then return ()
+                then return (tap,sink)
                 else do
-                   sz     <- flowOut tap buf bufferSize
-                   status <- pipeline sink ps buf sz
+                   (tap' , sz)     <- flowOut tap buf bufferSize
+                   (sink', status) <- pipeline sink ps buf sz
 
-                   exh' <- exhausted tap
-                   when (isNeed status && exh') $
-                      -- The first process wants more input, but there's no
-                      -- more to give. Hence what we do is enter the final
-                      -- pipeline: have the process close its stdin and deal
-                      -- with any leftover output.
-                      finalPipeline outhdl ps buf
-                   loop
-      loop
+                   exh' <- exhausted tap'
+                   if isNeed status && exh'
+                      then do
+                         -- The first process wants more input, but there's no
+                         -- more to give. Hence what we do is enter the final
+                         -- pipeline: have the process close its stdin and deal
+                         -- with any leftover output.
+                         sink'' <- finalPipeline sink' ps buf
+                         return (tap',sink'')
+                      else
+                         loop tap' sink'
+      loop otap osink
 #endif
 
 #if mingw32_HOST_OS
@@ -175,7 +177,7 @@ pipe wdir progs tap sink = do
 -- all its output, and then give it all at once to the next one. And yes, this
 -- means that if some process outputs (or the input file contains) an infinite
 -- amount of data or more than fits in memory, you're screwed.
-pipeline :: Sink s => s -> Ptr Word8 -> [Proc] -> ByteString -> IO ()
+pipeline :: Sink s => s -> Ptr Word8 -> [Proc] -> ByteString -> IO s
 pipeline sink buf ((i,o,p):ps) dat = do
    BS.hPut i dat
    hClose i
@@ -183,22 +185,22 @@ pipeline sink buf ((i,o,p):ps) dat = do
    waitForProcess p
    pipeline sink buf ps dat'
 
-pipeline sink buf [] dat = do
-   let loop s =
+pipeline osink buf [] dat = do
+   let loop sink s =
           if BS.null s
-             then return ()
+             then return sink
              else do
                 let (xs,ys) = BS.splitAt bufferSize s
                 pokeArray (castPtr buf) (BS.unpack xs)
-                flowIn sink buf (BS.length xs)
-                loop ys
-   loop dat
+                sink' <- flowIn sink buf (BS.length xs)
+                loop sink' ys
+   loop osink dat
 
 #else
 
-data Status = Done | Need
+data Need = Done | Need
 
-isNeed :: Status -> Bool
+isNeed :: Need -> Bool
 isNeed Need = True
 isNeed _    = False
 
@@ -206,7 +208,7 @@ isNeed _    = False
 onEPIPE :: IO a -> IO a -> IO a
 a `onEPIPE` b = a `catch` \e -> if isFullError e then b else ioError e
 
-pipeline, shoveDown :: Sink s => s -> [Proc] -> Ptr Word8 -> Int -> IO Status
+pipeline, shoveDown :: Sink s => s -> [Proc] -> Ptr Word8 -> Int -> IO (s,Need)
 pipeline sink []                   buf sz = toSink sink buf sz
 pipeline sink ps@((inp, out, _):_) buf sz = do
    -- Put the given data to the stdin of this process.
@@ -238,26 +240,26 @@ pipeline sink ps@((inp, out, _):_) buf sz = do
       then do
          wantsMore <- hIsOpen inp
          if wantsMore && not brokenPipe
-            then return Need
-            else blockingPipeline hdl ps buf
-      else shoveDown hdl ps buf sz'
+            then return (sink, Need)
+            else blockingPipeline sink ps buf
+      else shoveDown sink ps buf sz'
 
 shoveDown sink []          buf sz = toSink sink buf sz
 shoveDown sink ps@(p:rest) buf sz = do
    -- Pipe the output from the process above to the next process in the
    -- pipeline.
-   below <- pipeline hdl rest buf sz
+   (sink', below) <- pipeline sink rest buf sz
    case below of
         -- The process below wants more data: go back and try a nonblocking get
         -- from this process.
-        Need -> pipeline hdl ps buf 0
+        Need -> pipeline sink' ps buf 0
         -- The process below us says it wants nothing more ever again. Since it
         -- wants nothing from us, we have nothing to do either: finish up here
         -- and bubble the information up.
-        Done -> finalize p >> return Done
+        Done -> finalize p >> return (sink', Done)
 
 blockingPipeline,
-finalPipeline     :: Sink s => s -> [Proc] -> Ptr Word8 -> IO Status
+ finalPipeline    :: Sink s => s -> [Proc] -> Ptr Word8 -> IO (Sink, Need)
 blockingPipeline sink []                    buf = toSink sink buf 0
 blockingPipeline sink ps@(p@(_,out,_):rest) buf = do
    sz <- hGetBuf out buf bufferSize
@@ -268,10 +270,10 @@ blockingPipeline sink ps@(p@(_,out,_):rest) buf = do
       -- last output further down. After that, finish up here and tell the ones
       -- above to do the same.
       then do
-         finalPipeline hdl rest buf
+         sink' <- finalPipeline sink rest buf
          finalize p
-         return Done
-      else shoveDown hdl ps buf sz
+         return (sink', Done)
+      else shoveDown sink ps buf sz
 
 finalPipeline sink []               buf = toSink sink buf 0
 finalPipeline sink ps@((inp,_,_):_) buf = do
@@ -279,7 +281,7 @@ finalPipeline sink ps@((inp,_,_):_) buf = do
    -- Since the stdin is closed, we can jump straight to the blocking version
    -- of the pipeline: while we could go by way of the non-blocking one there's
    -- no need to do so.
-   blockingPipeline hdl ps buf
+   blockingPipeline sink ps buf
 
 -- Some data found its way all the way down the pipeline, so we put it in the
 -- output handle and let the processes know that we're ready for more.
@@ -288,8 +290,8 @@ finalPipeline sink ps@((inp,_,_):_) buf = do
 -- optimizer that it should inline these calls where the 0 is given explicitly
 -- above.
 toSink :: Sink s => s -> Ptr Word8 -> Int -> IO Status
-toSink _    _   0  =                       return Need
-toSink sink buf sz = flowIn sink buf sz >> return Need
+toSink sink _   0  =                                  return (sink , Need)
+toSink sink buf sz = flowIn sink buf sz >>= \sink' -> return (sink', Need)
 
 finalize :: Proc -> IO ()
 finalize (i,o,p) = do
@@ -322,8 +324,12 @@ withIgnoringSignal sig mx = do
 {-# RULES "pipe->handlePipe" pipe = handlePipe #-}
 
 -- Smarter way of piping Handle-to-Handle
-handlePipe :: FilePath -> [Command] -> Handle -> Handle -> IO ()
-handlePipe _    []     inhdl outhdl = hGetContents inhdl >>= hPutStr outhdl
+handlePipe :: FilePath -> [Command] -> Handle -> Handle -> IO (Handle, Handle)
+
+handlePipe _    []     inhdl outhdl = do
+   hGetContents inhdl >>= hPutStr outhdl
+   return (inhdl, outhdl)
+
 handlePipe wdir (p:ps) inhdl outhdl = do
    let cp = createProc wdir
 
@@ -336,3 +342,21 @@ handlePipe wdir (p:ps) inhdl outhdl = do
    (_,_,pid)   <- cp   (UseHandle inhdl) inp p
 
    mapM_ waitForProcess (pid:pids)
+
+   return (inhdl, outhdl)
+
+-- | A helper function which converts a @['Word8']@ to a 'String' by mapping
+-- 'chr' over the octets.
+--
+-- In most cases, when you wish to pipe data to a String, you do not want to
+-- interpret the results as the raw byte pattern of 'Char's, so you use
+-- @['Word8']@ as the 'Sink' type. This function handles the common case of
+-- ASCII data simply---if you're dealing with non-ASCII data you probably need
+-- to handle the results in a different way.
+word8ToString :: [Word8] -> String
+word8ToString = map (chr.fromIntegral)
+
+-- | The inverse of 'word8ToString'. Any 'Char's greater than 255 are
+-- truncated: once again, be careful with non-ASCII.
+stringToWord8 :: String -> [Word8]
+stringToWord8 = map (fromIntegral.ord)
