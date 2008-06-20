@@ -1,26 +1,55 @@
 -- File created: 2008-02-11 12:55:34
 {-# LANGUAGE CPP #-}
-module System.Process.Pipe (pipe) where
+{-# OPTIONS_GHC -fglasgow-exts -frewrite-rules #-} -- for the rewrite rule
+-------------------------------------------------------------------------------
+-- |
+-- Module    : System.Process.Pipe
+-- Copyright : (c) Matti Niemenmaa 2008
+-- License   : BSD (see LICENSE.txt)
+--
+-- Maintainer  : Matti Niemenmaa <matti.niemenmaa+web@iki.fi>
+-- Portability : non-portable (instances need FlexibleInstances/ScopedTypeVars)
+-- Stability   : experimental
+--
+-- Operations for piping data through multiple processes.
+--
+-- Whenever specifying a path to a process, explicitly specifying the current
+-- directory is recommended for portability. That is: use "./foo" instead of
+-- "foo", for instance.
+--
+-- On Windows, appending ".exe" to process paths is attempted if the invocation
+-- fails.
+-------------------------------------------------------------------------------
+module System.Process.Pipe
+   ( filePipe
+   , Accessible(..), Tap(..), Sink(..), bufferSize
+   , pipe
+   ) where
 
+import Control.Exception     (bracket_)
 import Control.Monad         (forM)
 import Data.Maybe            (fromJust)
-import System.Directory      (getCurrentDirectory)
-import System.FilePath       ((</>), isAbsolute, dropFileName)
+import Data.Word             (Word8)
+import Foreign.Marshal.Alloc (allocaBytes)
+import Foreign.Marshal.Array (peekArray, pokeArray)
+import Foreign.Ptr           (Ptr)
+import System.FilePath       (dropFileName)
 import System.IO             ( withBinaryFile, IOMode (ReadMode, WriteMode)
-                             , Handle, hClose)
+                             , Handle, hClose
+                             , hGetContents, hPutStr)
 import System.Process        ( CreateProcess(..), createProcess
                              , CmdSpec (RawCommand)
-                             , StdStream (CreatePipe, Inherit)
+                             , StdStream (CreatePipe, Inherit, UseHandle)
                              , ProcessHandle, waitForProcess)
+
+import System.Process.Pipe.Plumbing
 
 #if mingw32_HOST_OS
 import           Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
+import Foreign.Ptr           (castPtr)
 #else
 import Control.Monad         (when)
-import Data.Word             (Word8)
-import Foreign.Ptr           (Ptr)
-import Foreign.Marshal.Alloc (allocaBytes)
 import System.IO             ( hIsEOF, hIsOpen
                              , hGetBuf, hGetBufNonBlocking, hPutBuf)
 import System.IO.Error       (isFullError)
@@ -29,19 +58,50 @@ import System.Posix.Signals  ( Signal, openEndedPipe
 
 whenM :: (Monad m) => m Bool -> m a -> m ()
 whenM cond body = cond >>= \c -> when c (body >> return ())
-
-whileM, untilM :: (Monad m) => m Bool -> m a -> m ()
-whileM cond body = whenM cond (body >> whileM cond body)
-
-untilM cond = whileM (liftM not cond)
 #endif
 
+type Command = (FilePath, [String])
+type Proc  = (      Handle,       Handle, ProcessHandle)
+type MProc = (Maybe Handle, Maybe Handle, ProcessHandle)
+
+createProc :: FilePath -> StdStream -> StdStream -> Command -> IO MProc
+createProc wdir inp out (p,args) = do
+   let proc = CreateProcess
+         { cmdspec   = undefined
+         , cwd       = Just wdir
+         , env       = Nothing
+         , std_in    = inp
+         , std_out   = out
+         , std_err   = Inherit
+         , close_fds = True }
+
+   (i,o,_,pid) <-
+      createProcess proc { cmdspec = RawCommand p args }
+#if mingw32_HOST_OS
+         `catch` const (createProcess proc
+                         { cmdspec = RawCommand (p ++ ".exe") args })
+#endif
+   return (i,o,pid)
+
 -- | Pipes the contents of the first file to the second file through all the
--- programs named. Giving the full path (as in "./foo" instead of just "foo")
--- is recommended for portability. Appending ".exe" to the name is attempted if
--- starting a process in the given path doesn't work.
+-- programs named.
 --
--- The working directory used is the location of the first file.
+-- The working directory used is the directory component of the path to the
+-- first file.
+filePipe :: [Command] -> FilePath -> FilePath -> IO ()
+filePipe progs infile outfile = do
+   withBinaryFile outfile WriteMode $ \outhdl ->
+    withBinaryFile infile ReadMode  $ \inhdl ->
+      pipe (dropFileName infile) progs inhdl outhdl
+
+-- | Pipes data from the 'Tap' to the 'Sink' through all the commands named, in
+-- the given working directory.
+--
+-- Be careful! All IO is at the byte level: this means that piping even a
+-- String such as "foo" will result in the raw UTF-32 moving: the bytes (in my
+-- case; I believe this is implementation-dependent) in question are not the
+-- ASCII @[102, 111, 111]@ but rather @[102, 0, 0, 0, 111, 0, 0, 0, 111, 0, 0,
+-- 0]@.
 --
 -- Note to Windows users: since 'hGetBufNonBlocking' doesn't work on Windows
 -- (it blocks despite its name, see
@@ -52,61 +112,62 @@ untilM cond = whileM (liftM not cond)
 -- memory available. (In fact, ByteStrings are used, and their documentation
 -- suggests that you might want twice that, just in case.)
 --
--- If you want to do something about the above, ideally fix the GHC ticket and
--- let me know so that I can activate the better code for Windows as well.
--- Alternatively, feel free to code an implementation of this which works on
--- Windows.
-pipe :: [(FilePath, [String])] -> FilePath -> FilePath -> IO ()
-pipe progs infile outfile = do
-   absFile <- toAbsolutePath infile
-   let wdir = dropFileName absFile
-       proc = CreateProcess
-                 { cmdspec   = undefined
-                 , cwd       = Just wdir
-                 , env       = Nothing
-                 , std_in    = CreatePipe
-                 , std_out   = CreatePipe
-                 , std_err   = Inherit
-                 , close_fds = True }
+-- In addition, the Tap/Sink classes are meant for the POSIX code: having to
+-- move data through the @Ptr Word8@ types, 'bufferSize' bytes at a time,
+-- results in extra complexity.
+--
+-- If you want to do something about the above, ideally fix the GHC ticket
+-- (probably nontrivial) and let me know so that I can activate the better code
+-- for Windows as well. Alternatively, feel free to code an implementation of
+-- this which works on Windows.
+pipe :: (Tap t, Sink s) => FilePath -> [Command] -> t -> s -> IO ()
+pipe wdir progs tap sink = do
 
-   withBinaryFile outfile WriteMode $ \outhdl ->
-    withBinaryFile infile ReadMode  $ \inhdl ->
+   let cp = createProc wdir CreatePipe CreatePipe
+
+   bracket_ (open sink) (close sink) $
+    bracket_ (open tap) (close tap)  $
+     allocaBytes bufferSize $ \buf -> do
+        ps <- forM progs $ \pr -> do
+           (i,o,pid) <- cp pr
+           return (fromJust i, fromJust o, pid)
+
+-- See 'pipeline' comment below for why this needs to be done differently.
 #if mingw32_HOST_OS
-     do
-        ps <- forM progs $ \(pr, args) -> do
-           (i,o,_,p) <- createProcess proc { cmdspec = RawCommand pr args }
-                           `catch` const (createProcess proc
-                              { cmdspec = RawCommand (pr ++ ".exe") args })
-           return (fromJust i, fromJust o, p)
+        -- Gather up all data from the tap until it's exhausted.
+        let loop s = do
+             exh <- exhausted tap
+             if exh
+                then return s
+                else do
+                   sz <- flowOut tap buf bufferSize
+                   xs <- peekArray sz (castPtr buf)
+                   loop (s `BS.append` BS.pack xs)
 
-        dat <- BS.hGetContents inhdl
-        pipeline outhdl ps dat
+        s <- loop BS.empty
+        pipeline sink buf ps s
 #else
-     allocaBytes bufSize            $ \buf -> do
-        ps <- forM progs $ \(pr, args) -> do
-           (i,o,_,p) <- createProcess proc { cmdspec = RawCommand pr args }
-           return (fromJust i, fromJust o, p)
+        let loop = do
+             exh <- exhausted tap
+             if exh
+                then return ()
+                else do
+                   sz     <- flowOut tap buf bufferSize
+                   status <- pipeline sink ps buf sz
 
-        untilM (hIsEOF inhdl) $ do
-           sz <- hGetBuf inhdl buf bufSize
-           status <- pipeline outhdl ps buf sz
-
-           when (isNeed status) . whenM (hIsEOF inhdl) $
-              -- The first process wants more input, but there's no more to
-              -- give. Hence what we do is enter the final pipeline: have the
-              -- process close its stdin and deal with any leftover output.
-              finalPipeline outhdl ps buf
+                   exh' <- exhausted tap
+                   when (isNeed status && exh') $
+                      -- The first process wants more input, but there's no
+                      -- more to give. Hence what we do is enter the final
+                      -- pipeline: have the process close its stdin and deal
+                      -- with any leftover output.
+                      finalPipeline outhdl ps buf
+                   loop
+         in loop
 #endif
 
-toAbsolutePath :: FilePath -> IO FilePath
-toAbsolutePath p =
-   if isAbsolute p
-      then return p
-      else getCurrentDirectory >>= return . (</> p)
-
-type Proc = (Handle, Handle, ProcessHandle)
-
 #if mingw32_HOST_OS
+
 -- hGetBufNonBlocking doesn't work on Windows (see
 -- http://hackage.haskell.org/trac/ghc/ticket/806). I can't think of a way of
 -- doing a robust constant-space pipeline without it. Hence we use this silly
@@ -117,19 +178,27 @@ type Proc = (Handle, Handle, ProcessHandle)
 -- all its output, and then give it all at once to the next one. And yes, this
 -- means that if some process outputs (or the input file contains) an infinite
 -- amount of data or more than fits in memory, you're screwed.
-pipeline :: Handle -> [Proc] -> ByteString -> IO ()
-pipeline hdl ((i,o,p):ps) dat = do
+pipeline :: Sink s => s -> Ptr Word8 -> [Proc] -> ByteString -> IO ()
+pipeline sink buf ((i,o,p):ps) dat = do
    BS.hPut i dat
    hClose i
    dat' <- BS.hGetContents o
    waitForProcess p
-   pipeline hdl ps dat'
+   pipeline sink buf ps dat'
 
-pipeline hdl [] dat = BS.hPut hdl dat
+pipeline sink buf [] dat = do
+   let loop s =
+          if BS.null s
+             then return ()
+             else do
+                let (xs,ys) = BS.splitAt bufferSize s
+                pokeArray (castPtr buf) (BS.unpack xs)
+                flowIn sink buf (BS.length xs)
+                loop ys
+   loop dat
 
 #else
 
-type Buf    = Ptr Word8
 data Status = Done | Need
 
 isNeed :: Status -> Bool
@@ -140,9 +209,9 @@ isNeed _    = False
 onEPIPE :: IO a -> IO a -> IO a
 a `onEPIPE` b = a `catch` \e -> if isFullError e then b else ioError e
 
-pipeline, shoveDownPipeline :: Handle -> [Proc] -> Buf -> Int -> IO Status
-pipeline hdl []                   buf sz = pipelineReachedFile hdl buf sz
-pipeline hdl ps@((inp, out, _):_) buf sz = do
+pipeline, shoveDown :: Sink s => s -> [Proc] -> Ptr Word8 -> Int -> IO Status
+pipeline sink []                   buf sz = toSink sink buf sz
+pipeline sink ps@((inp, out, _):_) buf sz = do
    -- Put the given data to the stdin of this process.
    --
    -- We have to be careful with SIGPIPEs here. If hPutBuf fails, that's
@@ -159,10 +228,10 @@ pipeline hdl ps@((inp, out, _):_) buf sz = do
             `onEPIPE` return True
 
    -- We can't block here, lest it be the case where the program has output
-   -- e.g. bufSize-1 bytes, but is waiting on input. If we block here then
+   -- e.g. bufferSize-1 bytes, but is waiting on input. If we block here then
    -- we're waiting for more output while the process is waiting for more
    -- input---deadlock!
-   sz' <- hGetBufNonBlocking out buf bufSize
+   sz' <- hGetBufNonBlocking out buf bufferSize
    if sz' == 0
       -- We got no output from this process. If the process's stdin is open,
       -- we request more input for it from the process above us. Otherwise
@@ -174,10 +243,10 @@ pipeline hdl ps@((inp, out, _):_) buf sz = do
          if wantsMore && not brokenPipe
             then return Need
             else blockingPipeline hdl ps buf
-      else shoveDownPipeline hdl ps buf sz'
+      else shoveDown hdl ps buf sz'
 
-shoveDownPipeline hdl []          buf sz = pipelineReachedFile hdl buf sz
-shoveDownPipeline hdl ps@(p:rest) buf sz = do
+shoveDown sink []          buf sz = toSink sink buf sz
+shoveDown sink ps@(p:rest) buf sz = do
    -- Pipe the output from the process above to the next process in the
    -- pipeline.
    below <- pipeline hdl rest buf sz
@@ -190,10 +259,11 @@ shoveDownPipeline hdl ps@(p:rest) buf sz = do
         -- and bubble the information up.
         Done -> finalize p >> return Done
 
-blockingPipeline, finalPipeline :: Handle -> [Proc] -> Buf -> IO Status
-blockingPipeline hdl []                    buf = pipelineReachedFile hdl buf 0
-blockingPipeline hdl ps@(p@(_,out,_):rest) buf = do
-   sz <- hGetBuf out buf bufSize
+blockingPipeline,
+finalPipeline     :: Sink s => s -> [Proc] -> Ptr Word8 -> IO Status
+blockingPipeline sink []                    buf = toSink sink buf 0
+blockingPipeline sink ps@(p@(_,out,_):rest) buf = do
+   sz <- hGetBuf out buf bufferSize
    if sz == 0
       -- The blocking call returned 0: this means we've hit EOF, i.e. the
       -- process is done and will no longer output anything. Go down the
@@ -204,10 +274,10 @@ blockingPipeline hdl ps@(p@(_,out,_):rest) buf = do
          finalPipeline hdl rest buf
          finalize p
          return Done
-      else shoveDownPipeline hdl ps buf sz
+      else shoveDown hdl ps buf sz
 
-finalPipeline hdl []               buf = pipelineReachedFile hdl buf 0
-finalPipeline hdl ps@((inp,_,_):_) buf = do
+finalPipeline sink []               buf = toSink sink buf 0
+finalPipeline sink ps@((inp,_,_):_) buf = do
    hClose inp
    -- Since the stdin is closed, we can jump straight to the blocking version
    -- of the pipeline: while we could go by way of the non-blocking one there's
@@ -220,9 +290,9 @@ finalPipeline hdl ps@((inp,_,_):_) buf = do
 -- The special case for 0, while handled in hPutBuf, is my little hint to the
 -- optimizer that it should inline these calls where the 0 is given explicitly
 -- above.
-pipelineReachedFile :: Handle -> Buf -> Int -> IO Status
-pipelineReachedFile _   _   0  =                       return Need
-pipelineReachedFile hdl buf sz = hPutBuf hdl buf sz >> return Need
+toSink :: Sink s => s -> Ptr Word8 -> Int -> IO Status
+toSink _    _   0  =                       return Need
+toSink sink buf sz = flowIn sink buf sz >> return Need
 
 finalize :: Proc -> IO ()
 finalize (i,o,p) = do
@@ -243,13 +313,29 @@ finalize (i,o,p) = do
    waitForProcess p
    return ()
 
-bufSize :: Int
-bufSize = 48*1024
-
 withIgnoringSignal :: Signal -> IO a -> IO a
 withIgnoringSignal sig mx = do
    old <- installHandler sig Ignore Nothing
    x <- mx
    installHandler sig old Nothing
    return x
+
 #endif
+
+{-# RULES "pipe->handlePipe" pipe = handlePipe #-}
+
+-- Smarter way of piping Handle-to-Handle
+handlePipe :: FilePath -> [Command] -> Handle -> Handle -> IO ()
+handlePipe _    []     inhdl outhdl = hGetContents inhdl >>= hPutStr outhdl
+handlePipe wdir (p:ps) inhdl outhdl = do
+   let cp = createProc wdir
+
+       f pids out []       = return (out, pids)
+       f pids out (pr:prs) = do
+          (i,_,pid) <- cp CreatePipe out pr
+          f (pid:pids) (UseHandle . fromJust $ i) prs
+
+   (inp, pids) <- f [] (UseHandle outhdl) (reverse ps)
+   (_,_,pid)   <- cp   (UseHandle inhdl) inp p
+
+   mapM_ waitForProcess (pid:pids)
