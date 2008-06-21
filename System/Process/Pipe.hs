@@ -13,9 +13,10 @@
 --
 -- Operations for piping data through multiple processes.
 --
--- 'pipe' is the most general function, with 'filePipe' provided for
--- convenience purposes. For the common case of piping 'String's, the
--- 'word8ToString' and 'stringToWord8' helpers are included.
+-- 'pipe' is the most general function, with 'filePipe' and 'pipe\'' provided
+-- for convenience purposes. For the common case of piping between 'String's,
+-- the 'pipeString' wrapper and the 'word8ToString' and 'stringToWord8' helpers
+-- are included.
 --
 -- Whenever specifying a path to a process, explicitly specifying the current
 -- directory is recommended for portability. That is: use \".\/foo\" instead of
