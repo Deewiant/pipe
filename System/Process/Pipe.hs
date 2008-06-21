@@ -27,7 +27,7 @@
 module System.Process.Pipe
    ( filePipe
    , Tap(..), Sink(..), bufferSize
-   , pipe
+   , pipe, pipe', pipeString
    , word8ToString, stringToWord8
    ) where
 
@@ -351,6 +351,21 @@ handlePipe wdir (p:ps) inhdl outhdl = do
    mapM_ waitForProcess (pid:pids)
 
    return (inhdl, outhdl)
+
+-- | A convenience function for when you don't care about the working
+-- directory.
+--
+-- > pipe' = pipe "."
+pipe' :: (Tap t, Sink s) => [(FilePath,[String])] -> t -> s -> IO (t,s)
+pipe' = pipe "."
+
+-- | A convenience function for the common case of piping from a 'String' to a
+-- 'String'. This uses the 'word8ToString' and 'stringToWord8' functions and
+-- thus loses information if your 'Char's are non-ASCII.
+pipeString :: [(FilePath, [String])] -> String -> IO String
+pipeString progs s = do
+   (_, out) <- pipe' progs (stringToWord8 s) ([] :: [Word8])
+   return (word8ToString out)
 
 -- | A helper function which converts a @['Word8']@ to a 'String' by mapping
 -- 'chr' over the octets.
