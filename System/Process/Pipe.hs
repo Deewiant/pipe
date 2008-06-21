@@ -8,17 +8,21 @@
 -- License   : BSD (see LICENSE.txt)
 --
 -- Maintainer  : Matti Niemenmaa <matti.niemenmaa+web@iki.fi>
--- Portability : portable
 -- Stability   : experimental
+-- Portability : portable
 --
 -- Operations for piping data through multiple processes.
 --
--- Whenever specifying a path to a process, explicitly specifying the current
--- directory is recommended for portability. That is: use "./foo" instead of
--- "foo", for instance.
+-- 'pipe' is the most general function, with 'filePipe' provided for
+-- convenience purposes. For the common case of piping 'String's, the
+-- 'word8ToString' and 'stringToWord8' helpers are included.
 --
--- On Windows, appending ".exe" to process paths is attempted if the invocation
--- fails.
+-- Whenever specifying a path to a process, explicitly specifying the current
+-- directory is recommended for portability. That is: use \".\/foo\" instead of
+-- \"foo\", for instance.
+--
+-- On Windows, appending \".exe\" to process paths is attempted if the
+-- invocation fails.
 -------------------------------------------------------------------------------
 module System.Process.Pipe
    ( filePipe
@@ -56,11 +60,11 @@ import System.Posix.Signals  ( Signal, openEndedPipe
                              , Handler (Ignore), installHandler)
 #endif
 
-type Command = (FilePath, [String])
 type Proc  = (      Handle,       Handle, ProcessHandle)
 type MProc = (Maybe Handle, Maybe Handle, ProcessHandle)
 
-createProc :: FilePath -> StdStream -> StdStream -> Command -> IO MProc
+createProc :: FilePath -> StdStream -> StdStream -> (FilePath,[String])
+           -> IO MProc
 createProc wdir inp out (p,args) = do
    let proc = CreateProcess
          { cmdspec   = undefined
@@ -84,7 +88,7 @@ createProc wdir inp out (p,args) = do
 --
 -- The working directory used is the directory component of the path to the
 -- first file.
-filePipe :: [Command] -> FilePath -> FilePath -> IO ()
+filePipe :: [(FilePath,[String])] -> FilePath -> FilePath -> IO ()
 filePipe progs infile outfile = do
    withBinaryFile outfile WriteMode $ \outhdl ->
     withBinaryFile infile ReadMode  $ \inhdl ->
@@ -95,29 +99,30 @@ filePipe progs infile outfile = do
 -- the given working directory.
 --
 -- Be careful! All IO is at the byte level: this means that piping even a
--- String such as "foo" will result in the raw UTF-32 moving: the bytes (in my
--- case; I believe this is implementation-dependent) in question are not the
+-- String such as \"foo\" will result in the raw UTF-32 moving: the bytes (in
+-- my case; I believe this is implementation-dependent) in question are not the
 -- ASCII @[102, 111, 111]@ but rather @[102, 0, 0, 0, 111, 0, 0, 0, 111, 0, 0,
 -- 0]@.
 --
 -- Note to Windows users: since 'hGetBufNonBlocking' doesn't work on Windows
 -- (it blocks despite its name, see
--- http://hackage.haskell.org/trac/ghc/ticket/806), this pipeline uses a
+-- <http://hackage.haskell.org/trac/ghc/ticket/806>), this pipeline uses a
 -- non-constant amount of space. The amount used is linear in the amount of
 -- data used at any point in the pipeline. So if you want to pipe 20 gibioctets
 -- of data to a program, you better make sure you have at least said amount of
 -- memory available. (In fact, ByteStrings are used, and their documentation
 -- suggests that you might want twice that, just in case.)
 --
--- In addition, the Tap/Sink classes are meant for the POSIX code: having to
--- move data through the @Ptr Word8@ types, 'bufferSize' bytes at a time,
--- results in extra complexity.
+-- In addition, the 'Tap' and 'Sink' classes are meant for the POSIX code:
+-- having to move data through the 'Ptr' 'Word8' types, 'bufferSize' bytes at a
+-- time, results in extra complexity.
 --
 -- If you want to do something about the above, ideally fix the GHC ticket
 -- (probably nontrivial) and let me know so that I can activate the better code
 -- for Windows as well. Alternatively, feel free to code an implementation of
 -- this which works on Windows.
-pipe :: (Tap t, Sink s) => FilePath -> [Command] -> t -> s -> IO (t,s)
+pipe :: (Tap t, Sink s) => FilePath -> [(FilePath,[String])] -> t -> s
+                        -> IO (t,s)
 pipe wdir progs otap osink = do
 
    let cp = createProc wdir CreatePipe CreatePipe
@@ -325,7 +330,8 @@ withIgnoringSignal sig mx = do
 {-# RULES "pipe->handlePipe" pipe = handlePipe #-}
 
 -- Smarter way of piping Handle-to-Handle
-handlePipe :: FilePath -> [Command] -> Handle -> Handle -> IO (Handle, Handle)
+handlePipe :: FilePath -> [(FilePath,[String])] -> Handle -> Handle
+           -> IO (Handle, Handle)
 
 handlePipe _    []     inhdl outhdl = do
    hGetContents inhdl >>= hPutStr outhdl
@@ -352,7 +358,7 @@ handlePipe wdir (p:ps) inhdl outhdl = do
 -- In most cases, when you wish to pipe data to a String, you do not want to
 -- interpret the results as the raw byte pattern of 'Char's, so you use
 -- @['Word8']@ as the 'Sink' type. This function handles the common case of
--- ASCII data simply---if you're dealing with non-ASCII data you probably need
+-- ASCII data simply&#8212;if you're dealing with non-ASCII data you probably need
 -- to handle the results in a different way.
 word8ToString :: [Word8] -> String
 word8ToString = map (chr.fromIntegral)

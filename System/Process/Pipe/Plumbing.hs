@@ -16,20 +16,20 @@ import Foreign.Ptr           (Ptr, castPtr)
 import Foreign.Storable      (Storable, sizeOf)
 import System.IO             (Handle, hGetBuf, hPutBuf, hIsEOF)
 
--- | From a Tap, data up to the requested amount flows into a Ptr. The exact
--- amount of Word8's that flowed is returned. The requested amount is
+-- | From a 'Tap', data up to the requested amount flows into a 'Ptr'. The
+-- exact amount of 'Word8'\'s that flowed is returned. The requested amount is
 -- guaranteed to be no greater than 'bufferSize'.
 class Tap a where
    flowOut   :: a -> Ptr Word8 -> Int -> IO (a, Int)
    exhausted :: a -> IO Bool
 
--- | To a Sink, the requested amount of Word8's flows from a Ptr. The requested
--- amount is guaranteed to be no greater than 'bufferSize'.
+-- | To a 'Sink', the requested amount of 'Word8'\'s flows from a 'Ptr'. The
+-- requested amount is guaranteed to be no greater than 'bufferSize'.
 class Sink a where
    flowIn :: a -> Ptr Word8 -> Int -> IO a
 
--- | The size of one chunk of data. A Ptr Word8 given to a 'Tap' or 'Sink' is
--- guaranteed to have room for this many Word8's, but no more.
+-- | The size of one chunk of data. A 'Ptr' 'Word8' given to a 'Tap' or 'Sink'
+-- is guaranteed to have room for this many 'Word8'\'s, but no more.
 bufferSize :: Int
 bufferSize = 32*1024
 
