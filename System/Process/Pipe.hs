@@ -143,7 +143,8 @@ pipe wdir progs otap osink = do
       sink <- pipeline osink buf ps s
       return (tap,sink)
 #else
-      let loop tap sink = do
+      let loop :: (Sink s, Tap t) => t -> s -> IO (t,s)
+          loop tap sink = do
              exh <- exhausted tap
              if exh
                 then return (tap,sink)
@@ -158,7 +159,7 @@ pipe wdir progs otap osink = do
                          -- more to give. Hence what we do is enter the final
                          -- pipeline: have the process close its stdin and deal
                          -- with any leftover output.
-                         sink'' <- finalPipeline sink' ps buf
+                         (sink'',_) <- finalPipeline sink' ps buf
                          return (tap',sink'')
                       else
                          loop tap' sink'
@@ -259,7 +260,7 @@ shoveDown sink ps@(p:rest) buf sz = do
         Done -> finalize p >> return (sink', Done)
 
 blockingPipeline,
- finalPipeline    :: Sink s => s -> [Proc] -> Ptr Word8 -> IO (Sink, Need)
+ finalPipeline    :: Sink s => s -> [Proc] -> Ptr Word8 -> IO (s, Need)
 blockingPipeline sink []                    buf = toSink sink buf 0
 blockingPipeline sink ps@(p@(_,out,_):rest) buf = do
    sz <- hGetBuf out buf bufferSize
@@ -270,7 +271,7 @@ blockingPipeline sink ps@(p@(_,out,_):rest) buf = do
       -- last output further down. After that, finish up here and tell the ones
       -- above to do the same.
       then do
-         sink' <- finalPipeline sink rest buf
+         (sink', _) <- finalPipeline sink rest buf
          finalize p
          return (sink', Done)
       else shoveDown sink ps buf sz
@@ -289,7 +290,7 @@ finalPipeline sink ps@((inp,_,_):_) buf = do
 -- The special case for 0, while handled in hPutBuf, is my little hint to the
 -- optimizer that it should inline these calls where the 0 is given explicitly
 -- above.
-toSink :: Sink s => s -> Ptr Word8 -> Int -> IO Status
+toSink :: Sink s => s -> Ptr Word8 -> Int -> IO (s, Need)
 toSink sink _   0  =                                  return (sink , Need)
 toSink sink buf sz = flowIn sink buf sz >>= \sink' -> return (sink', Need)
 
