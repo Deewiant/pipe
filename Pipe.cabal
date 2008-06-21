@@ -4,6 +4,7 @@ Name:        Pipe
 Version:     1.0
 Homepage:    http://iki.fi/matti.niemenmaa/pipe/
 Synopsis:    Process piping library
+Category:    System
 Description:
    A library with operations for piping data through a pipeline of processes.
 
