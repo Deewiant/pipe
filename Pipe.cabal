@@ -1,7 +1,7 @@
 Cabal-Version: >= 1.2
 
 Name:        Pipe
-Version:     1.0
+Version:     2.0
 Homepage:    http://iki.fi/matti.niemenmaa/pipe/
 Synopsis:    Process piping library
 Category:    System
@@ -16,13 +16,7 @@ License-File: LICENSE.txt
 Build-Type: Simple
 
 Library
-   Build-Depends: base >= 3 && < 4,
-                  process >= 1.0.1 && < 2.0,
-                  filepath >= 1.1 && < 2,
-                  bytestring >= 0.9 && < 1,
-                  containers >= 0.1 && < 1
+   Build-Depends: base     >= 3     && < 4,
+                  process  >= 1.0.1 && < 2.0,
+                  filepath >= 1.1   && < 2
    Exposed-Modules: System.Process.Pipe
-   Other-Modules: System.Process.Pipe.Plumbing
-
-   if !os(windows)
-      Build-Depends: unix >= 2.3 && < 3
