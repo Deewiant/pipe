@@ -17,6 +17,6 @@ Build-Type: Simple
 
 Library
    Build-Depends: base     >= 3     && < 4,
-                  process  >= 1.0.1 && < 2.0,
+                  process  >= 1.0.1 && < 2,
                   filepath >= 1.1   && < 2
    Exposed-Modules: System.Process.Pipe
