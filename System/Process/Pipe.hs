@@ -33,15 +33,20 @@ module System.Process.Pipe
    ) where
 
 import Control.Concurrent    (forkIO)
+import Control.Exception     (try, IOException)
 import Control.Monad         (mplus)
-import Data.Maybe            (fromJust)
 import System.FilePath       (dropFileName)
 import System.IO             ( withBinaryFile, IOMode (ReadMode, WriteMode)
-                             , Handle, hGetContents, hPutStr)
+                             , Handle, hGetContents, hPutStr, hClose)
 import System.Process        ( CreateProcess(..), createProcess
                              , CmdSpec (RawCommand)
                              , StdStream (CreatePipe, Inherit, UseHandle)
                              , ProcessHandle, waitForProcess)
+
+#if !mingw32_HOST_OS
+import Control.Exception    (bracket)
+import System.Posix.Signals (installHandler, sigPIPE, Handler(Ignore))
+#endif
 
 createProc :: FilePath -> StdStream -> StdStream -> (FilePath,[String])
            -> IO (Maybe Handle, Maybe Handle, ProcessHandle)
@@ -74,8 +79,8 @@ pipeline wdir inp out progs = f [] Nothing inp progs
       return (firstI `mplus` i', o, reverse (pid:pids))
 
    f pids firstI i (p:ps) = do
-      (i',o,pid) <- createProc wdir i CreatePipe p
-      f (pid:pids) (firstI `mplus` i') (UseHandle . fromJust $ o) ps
+      (i',Just o,pid) <- createProc wdir i CreatePipe p
+      f (pid:pids) (firstI `mplus` i') (UseHandle o) ps
 
 -- | Pipes the input, using the given writer and reader functions, through all
 -- the commands named, in the given working directory. Returns the result.
@@ -84,15 +89,27 @@ pipeline wdir inp out progs = f [] Nothing inp progs
 --
 -- The writer function is called in a 'forkIO'\'d thread, allowing this to be
 -- lazy.
+--
+-- SIGPIPE is ignored for the writer function. Likewise, any IOExceptions are
+-- caught and ignored.
 pipe :: (Handle -> a -> IO ()) -> (Handle -> IO b)
      -> FilePath -> [(FilePath,[String])]
      -> a -> IO b
 
-pipe writer reader wdir progs i = do
-   (inp, out, pids) <- pipeline wdir CreatePipe CreatePipe progs
+pipe writer reader wdir progs dat = do
+   (Just inp, Just out, pids) <- pipeline wdir CreatePipe CreatePipe progs
 
-   forkIO (writer (fromJust inp) i >> mapM_ waitForProcess pids)
-   reader (fromJust out)
+   forkIO $ do
+#if !mingw32_HOST_OS
+      bracket
+         (         installHandler sigPIPE Ignore Nothing)
+         (\orig -> installHandler sigPIPE orig   Nothing)
+         $ \_   -> do
+#endif
+            try (writer inp dat) :: IO (Either IOException ())
+            hClose inp `catch` const (return ())
+            mapM_ waitForProcess pids
+   reader out
 
 -- | A convenience function for when you don't care about the working
 -- directory, 'pipe\'' uses ".".
