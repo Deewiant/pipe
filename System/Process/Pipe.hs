@@ -90,7 +90,7 @@ pipeline wdir inp out progs = f [] Nothing inp progs
 -- The writer function is called in a 'forkIO'\'d thread, allowing this to be
 -- lazy.
 --
--- SIGPIPE is ignored for the writer function. Likewise, any IOExceptions are
+-- SIGPIPE is ignored in the writer thread. Likewise, any IOExceptions are
 -- caught and ignored.
 pipe :: (Handle -> a -> IO ()) -> (Handle -> IO b)
      -> FilePath -> [(FilePath,[String])]
