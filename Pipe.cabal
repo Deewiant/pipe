@@ -1,7 +1,7 @@
 Cabal-Version: >= 1.2
 
 Name:        Pipe
-Version:     2.0.1
+Version:     2.1.0
 Homepage:    http://iki.fi/matti.niemenmaa/pipe/
 Synopsis:    Process piping library
 Category:    System
