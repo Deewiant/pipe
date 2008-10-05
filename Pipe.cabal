@@ -22,4 +22,4 @@ Library
    Exposed-Modules: System.Process.Pipe
 
    if !os(windows)
-   	Build-Depends: unix >= 2.3 && < 3
+      Build-Depends: unix >= 2.3 && < 3
