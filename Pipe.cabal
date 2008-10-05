@@ -20,3 +20,6 @@ Library
                   process  >= 1.0.1 && < 2,
                   filepath >= 1.1   && < 2
    Exposed-Modules: System.Process.Pipe
+
+   if !os(windows)
+   	Build-Depends: unix >= 2.3 && < 3
