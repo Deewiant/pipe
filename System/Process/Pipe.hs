@@ -88,7 +88,10 @@ pipeline wdir inp out progs = f [] Nothing inp progs
 -- An exception is thrown if the list of programs is empty.
 --
 -- The writer function is called in a 'forkIO'\'d thread, allowing this to be
--- lazy.
+-- lazy. That thread also calls 'waitForProcess' when done writing so that the
+-- processes get terminated cleanly; this means that the runtime should be
+-- multithreaded, or the call will block all threads and this function may
+-- deadlock. (In GHC, compile with @-threaded@.)
 --
 -- SIGPIPE is ignored in the writer thread. Likewise, any IOExceptions are
 -- caught and ignored.
