@@ -3,19 +3,19 @@
 -------------------------------------------------------------------------------
 -- |
 -- Module    : System.Process.Pipe
--- Copyright : (c) Matti Niemenmaa 2008
+-- Copyright : (c) Matti Niemenmaa 2008-2009
 -- License   : BSD (see LICENSE.txt)
 --
--- Maintainer  : Matti Niemenmaa <matti.niemenmaa+web@iki.fi>
+-- Maintainer  : Matti Niemenmaa <matti.niemenmaa+pipe@iki.fi>
 -- Stability   : experimental
 -- Portability : portable
 --
 -- Operations for piping data through multiple processes.
 --
--- 'pipe' is the most general function, with 'pipe\'' and 'pipeString' provided
+-- 'pipe' is the most general function, with 'pipe'' and 'pipeString' provided
 -- for convenience purposes.
 --
--- 'handlePipe', 'filePipe', and 'filePipe\'' are for the common file-to-file
+-- 'handlePipe', 'filePipe', and 'filePipe'' are for the common file-to-file
 -- case and behave somewhat differently.
 --
 -- Whenever specifying a path to a process, explicitly specifying the current
@@ -87,7 +87,7 @@ pipeline wdir inp out progs = f [] Nothing inp progs
 --
 -- An exception is thrown if the list of programs is empty.
 --
--- The writer function is called in a 'forkIO'\'d thread, allowing this to be
+-- The writer function is called in a 'forkIO''d thread, allowing this to be
 -- lazy. That thread also calls 'waitForProcess' when done writing so that the
 -- processes get terminated cleanly; this means that the runtime should be
 -- multithreaded, or the call will block all threads and this function may
@@ -115,7 +115,7 @@ pipe writer reader wdir progs dat = do
    reader out
 
 -- | A convenience function for when you don't care about the working
--- directory, 'pipe\'' uses ".".
+-- directory, 'pipe'' uses \".\".
 pipe' :: (Handle -> a -> IO ()) -> (Handle -> IO b)
       -> [(FilePath,[String])]
       -> a -> IO b
@@ -128,8 +128,8 @@ pipeString = pipe' hPutStr hGetContents
 
 -- | A function for the common case of piping from a 'Handle' to a 'Handle'.
 --
--- Note that this is not a convenient frontend for 'pipe' and is fundamentally
--- different in the following ways:
+-- Note that this is not merely a convenient frontend for 'pipe' and is
+-- fundamentally different in the following ways:
 --
 -- * A null list of programs is allowed, in which case the contents of the
 --   input Handle are simply written to the output Handle.
